@@ -23,15 +23,7 @@ from src.grounding import ground_icon
 # Slow down pyautogui slightly for reliability; disable corner-failsafe.
 pyautogui.PAUSE = 0.05
 pyautogui.FAILSAFE = False
-#"Notepad icon — a Windows text editor application, typically showing "
-#    "a notepad or paper with lines, possibly labeled 'Notepad' underneath"
-NOTEPAD_TARGET = (
-    "Notepad shortcut icon on the Windows desktop — a spiral-bound notebook "
-    "with a light blue/teal cover and horizontal ruled white lines on the page, "
-    "with a small blue Windows shortcut arrow overlaid in the bottom-left corner "
-    "of the icon. It may be labeled 'Notepad' in small text underneath. "
-    "It is distinct from folder icons, PDF icons, and browser icons."
-)
+NOTEPAD_TARGET = "Windows Notepad application shortcut icon"
 
 
 # ── Desktop path ────────────────────────────────────────────────────────────

@@ -7,8 +7,4 @@ env/
 venv/
 .venv/
 .claude/
-debug_planner_crop.png
-debug_planner_region.png
-debug_result.png
-debug_screenshot.png
-debug_full.png
+CLAUDE.md

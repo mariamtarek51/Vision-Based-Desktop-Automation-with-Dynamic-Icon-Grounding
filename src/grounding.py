@@ -1,230 +1,87 @@
 """
-Two-stage cascaded visual grounding using Groq API (Llama 4 Vision).
+Visual grounding using Gemini 2.5 Flash bounding box detection + verification.
 
-Stage 1 – Planner : full screenshot → coarse region [x1,y1,x2,y2] (normalized)
-Stage 2 – Grounder: crop of that region → exact center (x,y) (normalized)
-
-Works for ANY icon described in natural language.
+Pipeline per call:
+  1. Send full-resolution screenshot → Gemini → bounding box
+  2. Crop detected region → Gemini → YES/NO verification
+  3. Return centre pixel coordinates on confirmation, else retry.
 """
 
-import base64
 import json
+import os
 import re
 import time
 from io import BytesIO
 
-from groq import Groq
-from PIL import Image
+from google import genai
+from google.genai import types
+from PIL import Image, ImageDraw
 
-MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+MODEL = "gemini-3-flash-preview"
 
-# ── Prompts (exact spec) ────────────────────────────────────────────────────
+DETECTION_PROMPT = """\
+Find the {target_description} on this Windows desktop screenshot.
+Return its bounding box.
+{exclusions}
+Return ONLY a JSON array:
+[{{"box_2d": [y_min, x_min, y_max, x_max], "label": "icon name"}}]
 
-PLANNER_PROMPT = """\
-You are a desktop GUI analysis expert.
-You are given a screenshot of a Windows desktop that may contain many small icons.
-Your job is to carefully scan every icon visible in the image and locate the one matching the target.
-
-Target: {target_description}
-
-Instructions:
-1. Scan the image systematically from top-left to bottom-right.
-2. Identify every icon you can see and read their labels.
-3. Find the one that matches the target description.
-4. Return a bounding region with generous padding (at least 100px in each direction) around it.
-
-Return ONLY this JSON, nothing else:
-{{
-  "found": true or false,
-  "region": {{
-    "x1_normalized": 0.0,
-    "y1_normalized": 0.0,
-    "x2_normalized": 0.5,
-    "y2_normalized": 0.5
-  }},
-  "reasoning": "which icon you found and where it is on screen",
-  "confidence": "high" or "medium" or "low"
-}}
 Rules:
-- All values between 0.0 and 1.0
-- Make the region LARGER than the icon — add padding so the grounder has context
-- If you cannot confidently identify the target icon, set found to false
-- Return ONLY JSON, no markdown, no explanation\
+- box_2d values are integers 0-1000
+- y comes before x
+- Return [] if not found
+- Return ONLY JSON, no markdown\
 """
 
-GROUNDER_PROMPT = """\
-You are a precise GUI element locator.
-You are given a CROPPED region of a Windows desktop screenshot.
-Find the EXACT center of the target icon in this crop.
-Target: {target_description}
-Return ONLY this JSON, nothing else:
-{{
-  "found": true or false,
-  "x_normalized": 0.0,
-  "y_normalized": 0.0,
-  "confidence": "high" or "medium" or "low",
-  "icon_label": "text label seen under icon"
-}}
-Rules:
-- Coordinates relative to THIS CROPPED IMAGE only
-- Point to CENTER of icon not the label beneath it
-- If not found set found to false
-- Return ONLY JSON, no markdown, no explanation\
+VERIFY_PROMPT = """\
+Does this image show the {target_description}?
+Answer YES or NO only.\
 """
-
-# ── Internal helpers ────────────────────────────────────────────────────────
-
-def _to_base64(img: Image.Image) -> str:
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
 
 
 def _strip_markdown(text: str) -> str:
-    """Remove ```json ... ``` fences and stray backticks defensively."""
     text = re.sub(r"```[a-zA-Z]*\s*", "", text)
-    text = text.replace("```", "")
-    return text.strip()
+    return text.replace("```", "").strip()
 
 
-def _call_vlm(client: Groq, prompt: str, image: Image.Image) -> dict:
-    """Send image + prompt to Groq VLM and return parsed JSON dict."""
-    b64 = _to_base64(image)
-    response = client.chat.completions.create(
-        model=MODEL,
-        temperature=0.0,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{b64}"},
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ],
+def _to_bytes(img: Image.Image, quality: int = 85) -> bytes:
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
+def _img_part(img: Image.Image, quality: int = 85) -> types.Part:
+    return types.Part(
+        inline_data=types.Blob(mime_type="image/jpeg", data=_to_bytes(img, quality))
     )
-    raw = response.choices[0].message.content
-    cleaned = _strip_markdown(raw)
-    return json.loads(cleaned)
 
 
-def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
-    return max(lo, min(hi, value))
+def _call(client: genai.Client, contents: list, temperature: float = 0.0) -> str:
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=contents,
+        config=types.GenerateContentConfig(temperature=temperature),
+    )
+    return response.text
 
 
-def _resize_for_planner(img: Image.Image, max_width: int = 1280) -> Image.Image:
-    """Scale width to max_width. Normalized coords are unaffected (ratio-based)."""
-    w, h = img.size
-    if w <= max_width:
-        return img
-    scale = max_width / w
-    return img.resize((max_width, int(h * scale)), Image.LANCZOS)
+def _detect(client, screenshot: Image.Image, target: str, exclusions: str = "") -> list[dict]:
+    """Ask Gemini to return bounding boxes for the target icon."""
+    prompt = DETECTION_PROMPT.format(target_description=target, exclusions=exclusions)
+    # Use temperature=0.7 so that exclusion prompts can actually shift the output
+    raw = _call(client, [_img_part(screenshot, quality=90), types.Part(text=prompt)], temperature=0.7)
+    print(f"  [gemini] detect response: {raw.strip()}")
+    return json.loads(_strip_markdown(raw))
 
 
-def _make_tiles(
-    img: Image.Image,
-    rows: int = 4,
-    cols: int = 5,
-    overlap: float = 0.15,
-) -> list[tuple[Image.Image, int, int]]:
-    """
-    Divide the screenshot into a rows×cols grid of overlapping tiles.
-    Returns list of (tile_image, offset_x, offset_y).
+def _verify(client, crop: Image.Image, target: str) -> bool:
+    """Confirm the detected crop actually matches the target visually."""
+    prompt = VERIFY_PROMPT.format(target_description=target)
+    raw = _call(client, [_img_part(crop, quality=95), types.Part(text=prompt)])
+    answer = raw.strip().upper()
+    print(f"  [gemini] verify response: {answer}")
+    return "YES" in answer
 
-    Why fine tiles instead of strips:
-    - A 4×5 grid on 1920×1080 gives ~420×290px tiles.
-    - Each tile contains ~3-5 icons — a trivial search for the model.
-    - Strips (~640px wide) still have 15-20 icons and the planner still guesses wrong.
-    - Tiles send directly to the GROUNDER (no planner coordinate-guessing needed).
-    """
-    W, H = img.size
-    step_x = W / cols
-    step_y = H / rows
-    ovl_x = int(step_x * overlap)
-    ovl_y = int(step_y * overlap)
-    tiles = []
-    for r in range(rows):
-        for c in range(cols):
-            x1 = max(0, int(c * step_x) - ovl_x)
-            y1 = max(0, int(r * step_y) - ovl_y)
-            x2 = min(W, int((c + 1) * step_x) + ovl_x)
-            y2 = min(H, int((r + 1) * step_y) + ovl_y)
-            tiles.append((img.crop((x1, y1, x2, y2)), x1, y1))
-    return tiles
-
-
-def _run_planner_grounder(
-    client: Groq,
-    planner_prompt: str,
-    grounder_prompt: str,
-    search_img: Image.Image,   # image sent to planner (may be a strip)
-    full_screenshot: Image.Image,  # always the original — grounder crops from here
-    offset_x: int,             # strip origin in full-screen coords
-    offset_y: int,
-) -> tuple[int, int] | None:
-    """
-    Run one planner→grounder pass on search_img.
-    Crops for the grounder are taken from the original full_screenshot
-    so the grounder always sees full-resolution pixels.
-    Returns full-screen (x, y) or None.
-    """
-    W_full, H_full = full_screenshot.size
-    W_search, H_search = search_img.size
-
-    # ── Stage 1: Planner ────────────────────────────────────────────────────
-    try:
-        plan = _call_vlm(client, planner_prompt, _resize_for_planner(search_img))
-    except (json.JSONDecodeError, Exception) as exc:
-        print(f"  [planner] error: {exc}")
-        return None
-
-    if not plan.get("found", False):
-        print(f"  [planner] not found – {plan.get('reasoning', '')}")
-        return None
-
-    print(f"  [planner] confidence={plan.get('confidence')} – {plan.get('reasoning', '')}")
-
-    region = plan.get("region", {})
-    # Planner coords are relative to search_img; remap to full-screen pixels
-    rx1 = offset_x + int(_clamp(region.get("x1_normalized", 0.0)) * W_search)
-    ry1 = offset_y + int(_clamp(region.get("y1_normalized", 0.0)) * H_search)
-    rx2 = offset_x + int(_clamp(region.get("x2_normalized", 1.0)) * W_search)
-    ry2 = offset_y + int(_clamp(region.get("y2_normalized", 1.0)) * H_search)
-
-    # Clamp to full-screen bounds
-    rx1, ry1 = max(0, rx1), max(0, ry1)
-    rx2, ry2 = min(W_full, rx2), min(H_full, ry2)
-
-    if rx2 <= rx1 or ry2 <= ry1:
-        print("  [planner] degenerate region")
-        return None
-
-    # Grounder always crops from the original full-resolution screenshot
-    crop = full_screenshot.crop((rx1, ry1, rx2, ry2))
-    cw, ch = crop.size
-
-    # ── Stage 2: Grounder ───────────────────────────────────────────────────
-    try:
-        ground = _call_vlm(client, grounder_prompt, crop)
-    except (json.JSONDecodeError, Exception) as exc:
-        print(f"  [grounder] error: {exc}")
-        return None
-
-    if not ground.get("found", False):
-        print("  [grounder] not found in crop")
-        return None
-
-    print(f"  [grounder] confidence={ground.get('confidence')} label='{ground.get('icon_label', '')}'")
-
-    lx = int(_clamp(ground.get("x_normalized", 0.5)) * cw)
-    ly = int(_clamp(ground.get("y_normalized", 0.5)) * ch)
-    return (rx1 + lx, ry1 + ly)
-
-
-# ── Public API ──────────────────────────────────────────────────────────────
 
 def ground_icon(
     target_description: str,
@@ -232,71 +89,106 @@ def ground_icon(
     max_retries: int = 3,
 ) -> tuple[int, int] | None:
     """
-    Two-stage cascaded grounding with strip-based fallback.
-
-    Pass 1: planner searches the full screenshot.
-    Pass 2 (fallback): planner searches each vertical strip separately.
-                       Handles dense/cluttered desktops where the full image
-                       overwhelms the model.
+    Locate a desktop icon using Gemini bounding box detection + verification.
 
     Args:
-        target_description: Natural-language description of the icon to find.
+        target_description: Visual description of the icon to find.
         screenshot:         PIL Image of the current desktop.
-        max_retries:        Full pipeline attempts before giving up.
+        max_retries:        Attempts before giving up.
 
     Returns:
         (x, y) screen pixel coordinates of the icon centre, or None.
     """
-    client = Groq()
+    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     W, H = screenshot.size
 
-    planner_prompt = PLANNER_PROMPT.format(target_description=target_description)
-    grounder_prompt = GROUNDER_PROMPT.format(target_description=target_description)
-
-    tiles = _make_tiles(screenshot, rows=4, cols=5, overlap=0.15)
-    total = len(tiles)
+    # Working copy of the screenshot — wrong regions get masked out per retry
+    search_img = screenshot.copy()
+    excluded_boxes: list[tuple] = []  # failed normalized (y_min, x_min, y_max, x_max)
 
     for attempt in range(1, max_retries + 1):
         print(f"  [grounding] attempt {attempt}/{max_retries}")
 
-        # ── Pass 1: planner + grounder on full screenshot ────────────────────
-        # Fast path — works when the desktop is less cluttered.
-        print("  [grounding] pass 1 – full screenshot")
-        result = _run_planner_grounder(
-            client, planner_prompt, grounder_prompt,
-            screenshot, screenshot, 0, 0,
-        )
-        if result:
-            print(f"  [grounding] found at {result}")
-            return result
+        # Build exclusion text from previously failed regions
+        if excluded_boxes:
+            excl_lines = "\n".join(f"  - {b}" for b in excluded_boxes)
+            exclusions = (
+                f"IMPORTANT: These regions were already checked and are WRONG — "
+                f"do NOT return boxes in these areas:\n{excl_lines}\n"
+                f"The target must be somewhere else on the screen.\n"
+            )
+        else:
+            exclusions = ""
 
-        # ── Pass 2: grounder-only grid search ────────────────────────────────
-        # The planner keeps guessing wrong coordinates on dense desktops.
-        # Solution: skip the planner and send each small tile (~420×290px,
-        # ~3-5 icons) directly to the grounder. The grounder only needs to
-        # answer "is it here? if so, where?" — a trivial task on a small tile.
-        print(f"  [grounding] pass 2 – tile grid search ({total} tiles, ~{screenshot.size[0]//5}×{screenshot.size[1]//4}px each)")
-        for idx, (tile, ox, oy) in enumerate(tiles):
-            print(f"  [tile {idx+1:02d}/{total}] offset=({ox},{oy}) size={tile.size}", end=" … ")
-            try:
-                ground = _call_vlm(client, grounder_prompt, tile)
-            except (json.JSONDecodeError, Exception) as exc:
-                print(f"error: {exc}")
+        try:
+            # ── Step 1: detect ───────────────────────────────────────────────
+            boxes = _detect(client, search_img, target_description, exclusions)
+
+            if not boxes:
+                print("  [gemini] no boxes returned")
+                time.sleep(2)
                 continue
 
-            if not ground.get("found", False):
-                print("not found")
+            box = boxes[0]
+            y_min, x_min, y_max, x_max = box["box_2d"]
+
+            # Skip immediately if model returned a box we already excluded
+            if (y_min, x_min, y_max, x_max) in excluded_boxes:
+                print("  [gemini] returned a previously excluded box — skipping verify")
+                time.sleep(2)
                 continue
 
-            cw, ch = tile.size
-            lx = int(_clamp(ground.get("x_normalized", 0.5)) * cw)
-            ly = int(_clamp(ground.get("y_normalized", 0.5)) * ch)
-            sx, sy = ox + lx, oy + ly
-            print(f"FOUND — label='{ground.get('icon_label','')}' confidence={ground.get('confidence')} → screen ({sx},{sy})")
-            return (sx, sy)
+            # Convert 0-1000 → screen pixels (always relative to original size)
+            px_x1 = int((x_min / 1000) * W)
+            px_y1 = int((y_min / 1000) * H)
+            px_x2 = int((x_max / 1000) * W)
+            px_y2 = int((y_max / 1000) * H)
 
-        print(f"  [grounding] attempt {attempt} exhausted – sleeping 1s")
-        time.sleep(1)
+            print(f"  [gemini] box=({px_x1},{px_y1})→({px_x2},{px_y2}) "
+                  f"label='{box.get('label', '')}'")
+
+            # Guard against degenerate boxes
+            if px_x2 <= px_x1 or px_y2 <= px_y1:
+                print("  [gemini] degenerate box, retrying")
+                time.sleep(2)
+                continue
+
+            # ── Step 2: verify crop (from original, unmasked screenshot) ─────
+            pad = 10
+            crop = screenshot.crop((
+                max(0, px_x1 - pad), max(0, px_y1 - pad),
+                min(W, px_x2 + pad), min(H, px_y2 + pad),
+            ))
+            if not _verify(client, crop, target_description):
+                print("  [gemini] verification failed — masking this region out")
+                # Track the failed region in normalized 0-1000 coords for prompt exclusion
+                excluded_boxes.append((y_min, x_min, y_max, x_max))
+                # Grey out the wrong region so the next attempt looks elsewhere
+                ImageDraw.Draw(search_img).rectangle(
+                    [max(0, px_x1 - pad), max(0, px_y1 - pad),
+                     min(W, px_x2 + pad), min(H, px_y2 + pad)],
+                    fill=(100, 100, 100)
+                )
+                time.sleep(2)
+                continue
+
+            cx = (px_x1 + px_x2) // 2
+            cy = (px_y1 + px_y2) // 2
+            print(f"  [grounding] confirmed at ({cx}, {cy})")
+            return (cx, cy)
+
+        except (json.JSONDecodeError, KeyError, IndexError) as exc:
+            print(f"  [gemini] parse error: {exc}")
+            time.sleep(2)
+        except Exception as exc:
+            msg = str(exc)
+            if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                wait = 30 * attempt
+                print(f"  [gemini] rate limited – waiting {wait}s")
+                time.sleep(wait)
+            else:
+                print(f"  [gemini] API error: {exc}")
+                time.sleep(2)
 
     print("  [grounding] all attempts exhausted – returning None")
     return None
