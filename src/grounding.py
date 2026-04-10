@@ -1,5 +1,5 @@
 """
-Visual grounding using Gemini 2.5 Flash bounding box detection + verification.
+Visual grounding using Gemini bounding box detection + verification.
 
 Pipeline per call:
   1. Send full-resolution screenshot → Gemini → bounding box
@@ -11,13 +11,28 @@ import json
 import os
 import re
 import time
+from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 
 from google import genai
 from google.genai import types
 from PIL import Image, ImageDraw
 
 MODEL = "gemini-3-flash-preview"
+
+# Output folder for detection result images (project_root/grounding/)
+_GROUNDING_DIR = Path(__file__).parent.parent / "grounding"
+
+# Cached API client — created once, reused across all ground_icon() calls
+_client: genai.Client | None = None
+
+
+def _get_client() -> genai.Client:
+    global _client
+    if _client is None:
+        _client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    return _client
 
 DETECTION_PROMPT = """\
 Find the {target_description} on this Windows desktop screenshot.
@@ -87,6 +102,7 @@ def ground_icon(
     target_description: str,
     screenshot: Image.Image,
     max_retries: int = 3,
+    save_debug: bool = True,
 ) -> tuple[int, int] | None:
     """
     Locate a desktop icon using Gemini bounding box detection + verification.
@@ -95,11 +111,12 @@ def ground_icon(
         target_description: Visual description of the icon to find.
         screenshot:         PIL Image of the current desktop.
         max_retries:        Attempts before giving up.
+        save_debug:         Save annotated result image to grounding/ folder.
 
     Returns:
         (x, y) screen pixel coordinates of the icon centre, or None.
     """
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    client = _get_client()
     W, H = screenshot.size
 
     # Working copy of the screenshot — wrong regions get masked out per retry
@@ -175,6 +192,20 @@ def ground_icon(
             cx = (px_x1 + px_x2) // 2
             cy = (px_y1 + px_y2) // 2
             print(f"  [grounding] confirmed at ({cx}, {cy})")
+
+            # Save annotated result image (skipped for popup/transient grounding)
+            if save_debug:
+                _GROUNDING_DIR.mkdir(exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                result_img = screenshot.copy()
+                d = ImageDraw.Draw(result_img)
+                d.rectangle([px_x1, px_y1, px_x2, px_y2], outline=(0, 255, 0), width=3)
+                d.line([(cx - 20, cy), (cx + 20, cy)], fill=(255, 0, 0), width=3)
+                d.line([(cx, cy - 20), (cx, cy + 20)], fill=(255, 0, 0), width=3)
+                out_path = _GROUNDING_DIR / f"detected_{timestamp}.png"
+                result_img.save(out_path)
+                print(f"  [grounding] saved → {out_path}")
+
             return (cx, cy)
 
         except (json.JSONDecodeError, KeyError, IndexError) as exc:

@@ -1,0 +1,4 @@
+Title: Test Post Two
+
+Body of the second test post.
+Checking reopen works.

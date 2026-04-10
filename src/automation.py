@@ -10,7 +10,6 @@ unicode text (API post bodies) pastes correctly into Notepad.
 import os
 import subprocess
 import time
-import winreg
 
 import pyautogui
 import win32clipboard
@@ -22,27 +21,7 @@ from src.grounding import ground_icon
 
 # Slow down pyautogui slightly for reliability; disable corner-failsafe.
 pyautogui.PAUSE = 0.05
-pyautogui.FAILSAFE = False
 NOTEPAD_TARGET = "Windows Notepad application shortcut icon"
-
-
-# ── Desktop path ────────────────────────────────────────────────────────────
-
-def get_desktop_path() -> str:
-    """
-    Resolve the real Desktop folder (handles OneDrive-redirected desktops).
-    Falls back to ~/Desktop if the registry key is absent.
-    """
-    try:
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
-        )
-        desktop, _ = winreg.QueryValueEx(key, "Desktop")
-        winreg.CloseKey(key)
-        return desktop
-    except OSError:
-        return os.path.join(os.path.expanduser("~"), "Desktop")
 
 
 # ── Window helpers ───────────────────────────────────────────────────────────
@@ -54,7 +33,7 @@ def minimize_all_windows() -> None:
          "(New-Object -ComObject Shell.Application).MinimizeAll()"],
         capture_output=True,
     )
-    time.sleep(1.2)  # give Windows time to animate
+    time.sleep(1.2)
 
 
 def find_notepad_hwnd() -> int | None:
@@ -75,7 +54,7 @@ def wait_for_notepad(timeout: int = 10) -> bool:
     while time.time() < deadline:
         if find_notepad_hwnd():
             return True
-        time.sleep(0.4)
+        time.sleep(0.3)
     return False
 
 
@@ -85,7 +64,7 @@ def focus_notepad() -> bool:
     if hwnd:
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         win32gui.SetForegroundWindow(hwnd)
-        time.sleep(0.3)
+        time.sleep(0.4)
         return True
     return False
 
@@ -112,83 +91,121 @@ def _set_clipboard(text: str) -> None:
         win32clipboard.CloseClipboard()
 
 
+def _clear_clipboard() -> None:
+    win32clipboard.OpenClipboard()
+    try:
+        win32clipboard.EmptyClipboard()
+    finally:
+        win32clipboard.CloseClipboard()
+
+
 # ── Notepad workflow ─────────────────────────────────────────────────────────
+
+def _kill_notepad() -> None:
+    """Force-terminate any running Notepad process."""
+    subprocess.run(["taskkill", "/f", "/im", "notepad.exe"], capture_output=True)
+    time.sleep(0.5)
+
 
 def launch_notepad(x: int, y: int) -> bool:
     """
-    Double-click the desktop icon at (x, y) and wait for Notepad to open.
-    Returns True if Notepad window was detected within 10 seconds.
+    Kill any existing Notepad, then double-click the icon to launch a fresh one.
+    Returns True on success.
     """
+    # Click empty desktop area first so the shell has focus
+    pyautogui.click(10, 10)
+    time.sleep(0.3)
     pyautogui.doubleClick(x, y)
-    launched = wait_for_notepad(timeout=10)
-    if launched:
-        print(f"  [notepad] launched (window detected)")
-        time.sleep(0.5)  # let Notepad fully render
-    else:
+
+    if not wait_for_notepad(timeout=10):
         print("  [notepad] timed out waiting for window")
-    return launched
+        return False
+
+    print("  [notepad] launched")
+    time.sleep(0.8)  # let Notepad fully render
+    return True
+
+
+def _click_notepad_center() -> None:
+    """Click the center of the Notepad window to guarantee keyboard focus."""
+    hwnd = find_notepad_hwnd()
+    if hwnd:
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        cx = (left + right) // 2
+        cy = (top + bottom) // 2
+        pyautogui.click(cx, cy)
+        time.sleep(0.3)
 
 
 def type_post_content(title: str, body: str) -> None:
     """
-    Paste the formatted post content into the active Notepad window.
-    Uses the clipboard so unicode characters survive intact.
+    Paste formatted post content into the active Notepad window.
+    Clears clipboard immediately after paste so it can't leak into Save As.
     """
     focus_notepad()
-    content = f"Title: {title}\n\n{body}"
-    _set_clipboard(content)
+    _click_notepad_center()  # guarantees keyboard focus even from a terminal
+    _set_clipboard(f"Title: {title}\n\n{body}")
     pyautogui.hotkey("ctrl", "v")
-    time.sleep(0.3)
+    time.sleep(0.5)
+    _clear_clipboard()
+
+
+def _wait_for_save_dialog(timeout: int = 8) -> bool:
+    """
+    Poll until the foreground window is no longer Notepad.
+    That means the Save As dialog (or any system dialog) has taken focus.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        fg = win32gui.GetForegroundWindow()
+        title = win32gui.GetWindowText(fg)
+        if "Notepad" not in title:
+            return True
+        time.sleep(0.2)
+    return False
 
 
 def save_as(filepath: str) -> None:
     """
-    Trigger Save As (Ctrl+S on an unsaved document), type the full file
-    path into the dialog's filename field, and confirm.
-    Also handles the 'replace existing file?' prompt that may follow.
+    Save the current Notepad document to filepath via Save As dialog.
+    Waits for the dialog to actually appear before typing the path.
     """
-    pyautogui.hotkey("ctrl", "s")
-    time.sleep(1.2)  # wait for Save As dialog to open
+    file_existed = os.path.exists(filepath)
 
-    # The filename field is focused by default in the Save As dialog.
-    # Select-all clears whatever default name is there, then paste the path.
+    focus_notepad()
+    pyautogui.hotkey("ctrl", "s")
+
+    if not _wait_for_save_dialog(timeout=8):
+        print("  [save] WARNING: Save As dialog did not appear in time")
+        return
+
+    time.sleep(0.3)  # let dialog fully render
+
+    # Clear filename field and type the full path
     pyautogui.hotkey("ctrl", "a")
     time.sleep(0.1)
-
-    # Use clipboard to paste path (handles spaces and special chars)
     _set_clipboard(filepath)
     pyautogui.hotkey("ctrl", "v")
-    time.sleep(0.2)
-
+    time.sleep(0.3)
     pyautogui.press("enter")
-    time.sleep(0.8)
+    time.sleep(1.0)
 
-    # Handle "File already exists – replace?" dialog (press Enter = Yes)
-    pyautogui.press("enter")
-    time.sleep(0.5)
+    # "Replace existing file?" confirmation — only if file existed before
+    # Default focused button is "No" so Tab moves focus to "Yes" before confirming
+    if file_existed:
+        pyautogui.press("tab")
+        time.sleep(0.1)
+        pyautogui.press("enter")
+        time.sleep(0.5)
+
+    _clear_clipboard()
 
 
 def close_notepad() -> None:
     """
-    Close Notepad with Alt+F4.
-    If a 'Do you want to save?' prompt appears, dismiss it without saving
-    (the file was already saved explicitly before this call).
+    Force-kill Notepad. File is already saved before this is called.
     """
-    hwnd = find_notepad_hwnd()
-    if not hwnd:
-        return
-
-    focus_notepad()
-    pyautogui.hotkey("alt", "f4")
-    time.sleep(0.8)
-
-    # If Notepad is still open, a save-prompt appeared – press Tab then Enter
-    # to select "Don't Save" (Tab moves from Save → Don't Save → Cancel).
-    if notepad_is_open():
-        pyautogui.press("tab")   # move to "Don't Save"
-        time.sleep(0.1)
-        pyautogui.press("enter")
-        time.sleep(0.5)
+    _kill_notepad()
 
 
 # ── Popup handling ───────────────────────────────────────────────────────────
@@ -203,7 +220,7 @@ def handle_popup_if_present(screenshot: Image.Image) -> bool:
         "a dismiss button on an unexpected popup, alert, or dialog box — "
         "could be labelled OK, Close, Cancel, Yes, No, or similar"
     )
-    coord = ground_icon(popup_description, screenshot, max_retries=2)
+    coord = ground_icon(popup_description, screenshot, max_retries=2, save_debug=False)
     if coord:
         x, y = coord
         print(f"  [popup] found dismiss button at ({x}, {y}), clicking")

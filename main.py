@@ -23,11 +23,9 @@ from src.api_client import fetch_posts
 from src.automation import (
     NOTEPAD_TARGET,
     close_notepad,
-    get_desktop_path,
     handle_popup_if_present,
     launch_notepad,
     minimize_all_windows,
-    notepad_is_open,
     save_as,
     take_screenshot,
     type_post_content,
@@ -36,8 +34,8 @@ from src.automation import (
 from src.grounding import ground_icon
 
 
-def ensure_project_dir(desktop: str) -> str:
-    project_dir = os.path.join(desktop, "tjm-project")
+def ensure_project_dir(path: str) -> str:
+    project_dir = os.path.join(path, "tjm-project")
     os.makedirs(project_dir, exist_ok=True)
     print(f"[setup] output directory: {project_dir}")
     return project_dir
@@ -57,7 +55,7 @@ def find_notepad_icon(retries: int = 3) -> tuple[int, int] | None:
     return None
 
 
-def process_post(post: dict, project_dir: str) -> bool:
+def process_post(post: dict, project_dir: str, coord: tuple[int, int]) -> bool:
     post_id = post["id"]
     filepath = os.path.join(project_dir, f"post_{post_id}.txt")
 
@@ -65,13 +63,8 @@ def process_post(post: dict, project_dir: str) -> bool:
     print(f"[post {post_id:02d}] {post['title'][:60]}")
     print(f"{'='*60}")
 
-    # ── Ground icon ──────────────────────────────────────────────────────────
-    coord = find_notepad_icon(retries=3)
-    if coord is None:
-        print(f"[post {post_id}] FAILED: could not locate Notepad icon")
-        return False
-
     # ── Launch ───────────────────────────────────────────────────────────────
+    minimize_all_windows()
     launched = launch_notepad(*coord)
     if not launched:
         screenshot = take_screenshot()
@@ -81,15 +74,27 @@ def process_post(post: dict, project_dir: str) -> bool:
         print(f"[post {post_id}] FAILED: Notepad did not open")
         return False
 
-    # ── Type, save, close ────────────────────────────────────────────────────
+    # ── Type ─────────────────────────────────────────────────────────────────
     type_post_content(post["title"], post["body"])
+
+    # ── Save (with popup recovery) ────────────────────────────────────────────
     save_as(filepath)
+    if not os.path.exists(filepath):
+        # File wasn't saved — a popup likely stole focus during Save As
+        print(f"[post {post_id}] save failed — checking for popup…")
+        if handle_popup_if_present(take_screenshot()):
+            time.sleep(0.5)
+            save_as(filepath)  # retry save after dismissing popup
+
+    if not os.path.exists(filepath):
+        print(f"[post {post_id}] FAILED: file not saved")
+        close_notepad()
+        return False
+
     print(f"[post {post_id}] saved → {filepath}")
 
+    # ── Close ─────────────────────────────────────────────────────────────────
     close_notepad()
-    if notepad_is_open():
-        handle_popup_if_present(take_screenshot())
-        close_notepad()
 
     print(f"[post {post_id}] done ✓")
     return True
@@ -101,15 +106,25 @@ def main() -> None:
         print("Set it with:  $env:GEMINI_API_KEY='your_key'")
         sys.exit(1)
 
-    project_dir = ensure_project_dir(get_desktop_path())
+    project_dir = ensure_project_dir(os.path.join(os.path.dirname(__file__), "automated"))
 
     print("\n[setup] fetching posts…")
     posts = fetch_posts(limit=10)
     print(f"[setup] {len(posts)} posts ready\n")
 
+    # Ground the icon once — reuse coordinates for all posts
+    print("[setup] locating Notepad icon…")
+    coord = find_notepad_icon(retries=3)
+    
+    #coord=(1851,896)
+    if coord is None:
+        print("ERROR: could not locate Notepad icon. Aborting.")
+        sys.exit(1)
+    print(f"[setup] Notepad icon at {coord} — will reuse for all posts\n")
+
     ok, fail = 0, 0
     for post in posts:
-        if process_post(post, project_dir):
+        if process_post(post, project_dir, coord):
             ok += 1
         else:
             fail += 1
