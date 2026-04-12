@@ -1,4 +1,0 @@
-Title: Test Post One
-
-Body of the first test post.
-Second line here.

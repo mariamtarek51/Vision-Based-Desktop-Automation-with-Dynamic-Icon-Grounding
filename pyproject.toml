@@ -9,6 +9,8 @@ dependencies = [
     "pillow",
     "requests",
     "pywin32",
+    "opencv-python>=4.13.0.92",
+    "numpy>=2.4.4",
 ]
 
 [project.scripts]

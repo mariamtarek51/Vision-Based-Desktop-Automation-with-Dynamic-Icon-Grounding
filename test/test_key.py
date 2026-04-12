@@ -11,10 +11,10 @@ if not api_key:
 
 client = genai.Client(api_key=api_key)
 
-print("Testing gemini-flash-latest...", end=" ", flush=True)
+print("Testing gemini-3-flash-preview...", end=" ", flush=True)
 try:
     response = client.models.generate_content(
-        model="gemini-flash-latest",
+        model="gemini-3-flash-preview",
         contents="Say hello in one word.",
     )
     print(f"OK → {response.text.strip()}")

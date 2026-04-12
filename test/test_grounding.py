@@ -13,16 +13,14 @@ Usage:
     uv run python test_grounding.py
 """
 
-import json
 import os
 import sys
 import time
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 from src.automation import NOTEPAD_TARGET, minimize_all_windows, take_screenshot
-from src.grounding import MODEL, DETECTION_PROMPT, VERIFY_PROMPT, _detect, _verify
-from google import genai
+from src.grounding import _detect, _get_client, _norm_to_pixels, _verify
 
 
 # ── Drawing helpers ──────────────────────────────────────────────────────────
@@ -66,10 +64,10 @@ def main() -> None:
 
     print(f"Target: {NOTEPAD_TARGET}\n")
 
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    client = _get_client()
     max_retries = 3
     final_coord = None
-    excluded_boxes: list[tuple] = []
+    excluded_boxes: set[tuple] = set()
 
     for attempt in range(1, max_retries + 1):
         print(f"{'='*50}")
@@ -77,6 +75,7 @@ def main() -> None:
         print(f"{'='*50}")
 
         # Build exclusion text
+        exclusions = ""
         if excluded_boxes:
             excl_lines = "\n".join(f"  - {b}" for b in excluded_boxes)
             exclusions = (
@@ -84,8 +83,6 @@ def main() -> None:
                 f"do NOT return boxes in these areas:\n{excl_lines}\n"
                 f"The target must be somewhere else on the screen.\n"
             )
-        else:
-            exclusions = ""
 
         # ── Detection ────────────────────────────────────────────────────────
         try:
@@ -105,20 +102,14 @@ def main() -> None:
             time.sleep(2)
             continue
 
-        box = boxes[0]
-        y_min, x_min, y_max, x_max = box["box_2d"]
-
-        # Convert 0-1000 → pixels
-        px_x1 = int((x_min / 1000) * W)
-        px_y1 = int((y_min / 1000) * H)
-        px_x2 = int((x_max / 1000) * W)
-        px_y2 = int((y_max / 1000) * H)
+        norm_box = tuple(boxes[0]["box_2d"])
+        px_x1, px_y1, px_x2, px_y2 = _norm_to_pixels(norm_box, W, H)
         cx = (px_x1 + px_x2) // 2
         cy = (px_y1 + px_y2) // 2
 
         print(f"  Box pixels: ({px_x1},{px_y1}) → ({px_x2},{px_y2})")
         print(f"  Centre: ({cx},{cy})")
-        print(f"  Label: '{box.get('label', '')}'")
+        print(f"  Label: '{boxes[0].get('label', '')}'")
 
         # ── Verification ─────────────────────────────────────────────────────
         pad = 10
@@ -131,7 +122,7 @@ def main() -> None:
 
         # ── Annotate and save attempt image ──────────────────────────────────
         box_color = "lime" if verified else "red"
-        status_text = f"Attempt {attempt}: {'VERIFIED' if verified else 'WRONG'} | label='{box.get('label', '')}' | ({cx},{cy})"
+        status_text = f"Attempt {attempt}: {'VERIFIED' if verified else 'WRONG'} | label='{boxes[0].get('label', '')}' | ({cx},{cy})"
         annotated = draw_box(screenshot, px_x1, px_y1, px_x2, px_y2, color=box_color)
         annotated = draw_crosshair(annotated, cx, cy)
         annotated = draw_label(annotated, status_text, 10, 10, color="yellow")
@@ -144,8 +135,7 @@ def main() -> None:
             final_coord = (cx, cy)
             break
 
-        # Track failed region for next attempt
-        excluded_boxes.append((y_min, x_min, y_max, x_max))
+        excluded_boxes.add(norm_box)
         time.sleep(2)
 
     # ── Final result ──────────────────────────────────────────────────────────

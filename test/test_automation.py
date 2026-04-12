@@ -16,9 +16,9 @@ import sys
 
 from src.automation import (
     close_notepad,
+    find_notepad_hwnd,
     launch_notepad,
     minimize_all_windows,
-    notepad_is_open,
     save_as,
     type_post_content,
 )
@@ -52,7 +52,7 @@ def run_post(post: dict, x: int, y: int) -> bool:
     # Close
     close_notepad()
 
-    if notepad_is_open():
+    if find_notepad_hwnd() is not None:
         print(f"  WARNING: Notepad still open after close")
         return False
 
