@@ -26,5 +26,5 @@ while True:
         MB_OKCANCEL | ICON_WARNING,
     )
     print(f"Dialog closed — button code: {result} (1=OK, 2=Cancel)")
-    print("Reopening in 4 seconds… (Ctrl+C to stop)")
-    time.sleep(10)
+    print("Reopening in 20 seconds… (Ctrl+C to stop)")
+    time.sleep(20)

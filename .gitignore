@@ -8,3 +8,4 @@ venv/
 .venv/
 .claude/
 CLAUDE.md
+matched_*.png

@@ -109,7 +109,7 @@ def launch_notepad(x: int, y: int) -> bool:
     time.sleep(0.3)
     pyautogui.doubleClick(x, y)
 
-    if not wait_for_notepad(timeout=3):
+    if not wait_for_notepad(timeout=5):
         print("  [notepad] timed out waiting for window")
         return False
 

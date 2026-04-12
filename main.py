@@ -146,7 +146,7 @@ def process_post(
 def main() -> None:
     print("Select grounding method:")
     print("  1. Gemini vision    (requires GEMINI_API_KEY, uses API quota)")
-    print("  2. Template matching (no API key needed, run capture_icon.py first)")
+    print("  2. Template matching (no API key needed)")
     method = int(input("Enter 1 or 2: ").strip())
     if method == 1:
         if not os.environ.get("GEMINI_API_KEY"):
