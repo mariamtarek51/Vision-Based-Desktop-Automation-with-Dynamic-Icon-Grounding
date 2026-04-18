@@ -18,13 +18,10 @@ ICON_WARNING   = 0x30
 print("Popup will appear in 5 seconds…")
 time.sleep(5)
 
-while True:
-    result = ctypes.windll.user32.MessageBoxW(
-        0,
-        "This is a test popup for the automation handler.\nIt should be dismissed automatically.",
-        "Test Popup",
-        MB_OKCANCEL | ICON_WARNING,
-    )
-    print(f"Dialog closed — button code: {result} (1=OK, 2=Cancel)")
-    print("Reopening in 20 seconds… (Ctrl+C to stop)")
-    time.sleep(20)
+result = ctypes.windll.user32.MessageBoxW(
+    0,
+    "This is a test popup for the automation handler.\nIt should be dismissed automatically.",
+    "Test Popup",
+    MB_OKCANCEL | ICON_WARNING,
+)
+print(f"Dialog closed — button code: {result} (1=OK, 2=Cancel)")

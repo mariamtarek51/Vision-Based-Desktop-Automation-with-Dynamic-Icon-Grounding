@@ -1,27 +1,35 @@
 # Vision-Based Desktop Automation
 
-A Windows desktop automation tool that fetches blog posts from a public API and saves each one as a `.txt` file — entirely through automated Notepad interaction. The app locates the Notepad icon on the desktop using computer vision, double-clicks it, pastes the post content, saves the file via the Save As dialog, and closes Notepad. It repeats this for all 10 posts automatically.
+Fetches 10 blog posts from a public API and saves each one as a `.txt` file by automating
+Windows Notepad end-to-end: locates the Notepad icon via computer vision, double-clicks it,
+pastes the content, and saves through the Save As dialog.
 
 ---
 
-## How It Works
+## Quick Start
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                        main.py                          │
-│                                                         │
-│  1. Ask user: Gemini vision or Template matching?       │
-│  2. Fetch 10 posts from JSONPlaceholder API             │
-│  3. For each post:                                      │
-│       ├─ Locate Notepad icon on desktop                 │
-│       ├─ Double-click to launch Notepad                 │
-│       ├─ Paste post content via clipboard               │
-│       ├─ Save as post_N.txt via Save As dialog          │
-│       └─ Force-close Notepad                            │
-└─────────────────────────────────────────────────────────┘
+```powershell
+# 1. Install dependencies (uv reads pyproject.toml + uv.lock)
+uv sync
+
+# 2. Run — you'll be prompted to pick a detection method (1, 2, or 3)
+
+# Method 1 — Gemini vision (requires API key)
+$env:GEMINI_API_KEY="your_key_here"
+uv run python main.py
+
+# Method 2 — Multi-template (offline; needs assets/notepad_icon_*.png per icon size)
+uv run python main.py
+
+# Method 3 — Two-gate template (offline; needs only assets/notepad.png)
+uv run python main.py
 ```
 
-The app supports two icon detection strategies — an AI-powered approach using Google Gemini, and a fully offline approach using OpenCV template matching.
+Output files land in `automated/tjm-project/post_1.txt … post_10.txt`.
+
+> **Note:** if `jsonplaceholder.typicode.com` is blocked on your network, connect through
+> Cloudflare WARP (free VPN) before running. Otherwise the app falls back to 10 built-in
+> dummy posts.
 
 ---
 
@@ -30,248 +38,85 @@ The app supports two icon detection strategies — an AI-powered approach using 
 ```
 D:\AutomationTask\
 ├── main.py                         # Entry point — orchestrates the full flow
-├── assets/
-│   ├── notepad_icon_small.png      # Template for small desktop icon size
-│   ├── notepad_icon_medium.png     # Template for medium desktop icon size
-│   └── notepad_icon_large.png      # Template for large desktop icon size
+├── assets/                         # Icon reference images (PNG)
 ├── src/
-│   ├── api_client.py               # Fetches posts from JSONPlaceholder API
-│   ├── grounding.py                # Method 1: Gemini vision detection pipeline
-│   ├── template_grounding.py       # Method 2: OpenCV edge template matching + Win32 popup dismissal
+│   ├── api_client.py               # Fetches posts from JSONPlaceholder
+│   ├── grounding.py                # Method 1: Gemini vision detection
+│   ├── template_grounding.py       # Methods 2 & 3: OpenCV matching + Win32 popup dismissal
 │   └── automation.py               # Notepad control: launch, type, save, close
-├── test/
-│   ├── test_template_grounding.py  # Runs template matching and saves debug images
-│   ├── open_popup.py               # Spawns a real Windows dialog for popup testing
-│   ├── test_grounding.py           # Runs Gemini grounding and saves annotated images
-│   ├── test_automation.py          # Tests Notepad automation with manual coordinates
-│   └── test_key.py                 # Checks remaining Gemini API quota
-└── automated/tjm-project/          # Output: post_1.txt … post_10.txt
+├── test/                           # Standalone test scripts
+├── automated/tjm-project/          # Output .txt files
+└── screenshoots/                   # Debug images (gemini/, templateMatching/, twoGates/)
 ```
 
 ---
 
-## Requirements
+## The Three Detection Methods
 
-- Windows 10 or 11
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/) package manager
-- Notepad shortcut visible on the desktop
-- **Method 1 only:** Google Gemini API key (free tier available)
-- **Method 2 only:** Pre-saved template images in `assets/`
+| | Method 1 (Gemini) | Method 2 (Multi-template) | Method 3 (Two-gate) |
+|---|---|---|---|
+| API key needed | Yes | No | No |
+| Reference images | None | One per icon size | One (any size) |
+| Handles icon size variation | Yes | No | Yes (multi-scale) |
+| Speed per detection | 1–3 s | < 100 ms | < 200 ms |
+| API cost | Yes (quota) | Free | Free |
 
----
+**Method 1 — Gemini Vision:** sends a screenshot to the API and asks for a bounding box
+around the Notepad icon. Converts the normalised 0–1000 coords to pixels.
 
-## Installation
+**Method 2 — Multi-template matching:** runs `cv2.matchTemplate` (TM_CCOEFF_NORMED) on
+Canny edges between each pre-captured reference image and the screenshot. Edge-based
+matching makes it wallpaper-agnostic. Needs one reference per icon size because Windows
+renders different artwork at each size class.
 
-```powershell
-uv sync
-```
-
----
-
-## Internet & VPN Notice
-
-> **The app fetches posts from `jsonplaceholder.typicode.com`.**
-> This API may be blocked or unreachable on some networks.
-> If you cannot access it directly, connect through **Cloudflare WARP** (free VPN) before running.
-> Without a working connection the app will automatically fall back to 10 built-in dummy posts
-> and continue running — no crash, but the content will not be real API data.
-
-Download Cloudflare WARP: https://one.one.one.one/
+**Method 3 — Two-gate template matching:** uses a single reference image with two
+verification stages. Gate 1 does a 20-scale coarse edge search (threshold 0.20). Gate 2
+verifies by edge hit-rate inside the alpha mask (threshold 0.35) — a plain ratio that
+cross-correlation can't inflate on sparse images.
 
 ---
 
-## Running the App
+## Per-Post Retry Flow
 
-### Method 1 — Gemini Vision
-
-Requires a Google Gemini API key. The icon is located once before the loop and the coordinates are reused for all 10 posts.
-
-```powershell
-$env:GEMINI_API_KEY="your_key_here"
-uv run python main.py
-# When prompted: enter 1
-```
-
-### Method 2 — Template Matching (Offline)
-
-No API key needed. Requires pre-saved icon images in the `assets/` folder.
-
-```powershell
-uv run python main.py
-# When prompted: enter 2
-```
-
----
-
-## Output
-
-All files are saved to `automated/tjm-project/`:
+Each post runs inside a unified 3-attempt loop. Every attempt executes the full pipeline,
+with inner one-shot popup recovery at the two steps most likely to be blocked.
 
 ```
-automated/tjm-project/
-├── post_1.txt
-├── post_2.txt
-├── ...
-└── post_10.txt
+for attempt in 1..3:
+    ├─ Ground   (skipped if a cached coord is still valid)
+    │    └─ fails → next attempt
+    │
+    ├─ Launch (double-click coord)
+    │    └─ fails → dismiss popup + reclick
+    │               └─ still fails → null coord, next attempt (re-ground)
+    │
+    ├─ Type     (paste title + body via clipboard)
+    │
+    └─ Save     (Ctrl+S → paste path → Enter)
+         └─ save unverified → dismiss popup + retry save
+                              └─ still fails → close Notepad, next attempt
+
+all 3 attempts fail → mark post FAILED, continue to the next post
 ```
 
-Each file contains:
-```
-Title: <post title>
-
-<post body>
-```
+**Coord caching by method:**
+- **Method 1:** lazy grounding on the first post; coord cached across posts to save API
+  calls. Re-grounds only when a launch failure invalidates the cache.
+- **Methods 2 & 3:** re-ground at the start of every post — they're free and fast.
 
 ---
 
 ## Popup Handling
 
-Unexpected popups (security warnings, "Replace file?" dialogs, system alerts) can interrupt
-the automation at two points: during Notepad launch or during Save As. The app detects and
-dismisses them automatically, then retries the interrupted step.
+Popups can appear during launch or during save. Dismissal routes by method:
 
-### Save Recovery — How the App Knows a Popup Blocked the Save
-
-After calling Save As, the app does not assume the file was saved. It checks whether the file
-actually exists on disk using `os.path.exists(filepath)`. If the file is missing, it means
-something went wrong — most likely a popup appeared on top of the Save As dialog and stole
-focus, preventing the filename from being typed or confirmed.
-
-```
-save_as(filepath)
-       │
-       ▼
-os.path.exists(filepath)?
-       │
-      NO → a popup probably blocked the save
-       │
-       ▼
-dismiss_popup()  ←── Method 1: Gemini finds the button
-       │              Method 2: Win32 enumerates buttons
-       │
-  dismissed?
-       │
-      YES → wait 0.5s → save_as(filepath) retry
-       │
-       ▼
-os.path.exists(filepath)?
-       │
-      NO → mark post as FAILED, close Notepad, move to next post
-      YES → continue normally
-```
-
-The file existence check is the source of truth — it does not matter what the UI appeared
-to do. If the file is on disk, the save succeeded. If it is not, the save failed regardless
-of what was shown on screen.
-
-### Method 1 — Gemini Vision Popup Handling
-
-Takes a fresh screenshot and sends it to the Gemini API with a description asking for a
-dismiss button — labelled OK, Close, Cancel, Yes, No, or similar. If Gemini returns
-coordinates for a button, the app clicks it and retries the interrupted step.
-
-```
-Popup appears
-     │
-     ▼
-Take screenshot → Send to Gemini → "Find a dismiss button"
-     │
-     ▼
-Gemini returns (x, y) → Click → Retry step
-```
-
-**Advantage:** works for any popup without knowing its content — Gemini reads the screen.  
-**Cost:** 1 extra API call per popup encounter.
-
----
-
-### Method 2 — Win32 API Popup Handling
-
-Uses the Windows API directly — no screenshot, no vision model. Checks the foreground window,
-enumerates all its buttons, and clicks the first one matching a priority list.
-
-```
-Popup appears
-     │
-     ▼
-GetForegroundWindow() → title is not "Notepad"?
-     │
-     ▼
-EnumChildWindows() → collect all Button controls
-     │
-     ▼
-Click first match: OK → Yes → Close → Cancel → (any button)
-```
-
-**Advantage:** extremely fast (< 2 ms total), fully offline, no API cost.  
-
-
----
-
-## Testing
-
-```powershell
-# Test template matching — inspect what the matcher sees
-uv run python test/test_template_grounding.py
-# Produces: debug_screenshot_edges.png, debug_match_result.png
-
-# Test popup dismissal (Method 2)
-# Terminal 1: spawn a test popup
-uv run python test/open_popup.py
-# Terminal 2: run the dismissal handler against it
-
-# Test Gemini grounding — saves annotated detection images to grounding/
-$env:GEMINI_API_KEY="your_key_here"
-uv run python test/test_grounding.py
-
-# Test full Notepad automation with a known icon position (no grounding)
-uv run python test/test_automation.py <x> <y>
-
-# Check remaining Gemini API quota
-uv run python test/test_key.py
-```
-
----
-
-## Grounding Methods — Pros & Cons
-
-### Method 1 — Gemini Vision
-
-Sends a screenshot to the Google Gemini multimodal API. Gemini returns bounding box
-coordinates of the target icon. A second API call verifies the detection before acting on it.
-
-| | |
-|---|---|
-| **Pros** | Works with zero setup — no reference images to capture |
-| | Handles any icon appearance, size, or theme automatically |
-| | Can detect and dismiss any unknown popup without knowing its content |
-| | Self-correcting — failed detections are masked and retried with a different prompt |
-| **Cons** | Requires a Gemini API key |
-| | Consumes API quota (2 calls per detection attempt) |
-| | Free tier limit: 20 requests/day — enough for ~10 posts with some retries |
-| | Adds latency — each API round trip takes 1–3 seconds |
-| | Requires an internet connection |
-| | Non-deterministic — results can vary between runs |
-
----
-
-### Method 2 — Template Matching
-
-Uses OpenCV Canny edge detection and `matchTemplate` to locate the icon on the live desktop
-by comparing pre-saved reference images against the current screenshot.
-
-| | |
-|---|---|
-| **Pros** | Fully offline — no API key, no internet, no quota |
-| | Fast — detection runs in milliseconds |
-| | Deterministic — same input always produces the same result |
-| | Wallpaper-agnostic — Canny edges strip the background, only the icon shape is matched |
-| | Works at any desktop position — searches the entire screenshot each time |
-| **Cons** | Requires pre-saved icon images in `assets/` |
-| | Breaks if the icon's visual design changes (e.g. a Windows update changes the artwork) |
-| | Cannot understand popup content — dismisses by button label only (`OK → Yes → Close → Cancel`) |
-| | Each Windows icon size class renders different artwork, so a separate template is needed per size |
+- **Method 1 — Gemini:** a guard first checks if the foreground is a `#32770` dialog
+  **owned by Notepad** (e.g. the legitimate Save As window) — if so, the handler exits
+  without calling Gemini. Otherwise it asks Gemini to find a dismiss button (OK/Close/
+  Cancel/Yes/No) and clicks it.
+- **Methods 2 & 3 — Win32 API:** checks the foreground window class, enumerates child
+  `Button` controls, and clicks the first match in `OK → Yes → Close → Cancel → fallback`.
+  Fully offline, < 2 ms.
 
 ---
 
@@ -279,10 +124,182 @@ by comparing pre-saved reference images against the current screenshot.
 
 | Package | Purpose |
 |---------|---------|
-| `google-genai` | Gemini API client for vision-based detection |
-| `opencv-python` | Template matching and Canny edge detection |
+| `google-genai` | Gemini API client (Method 1) |
+| `opencv-python` | Template matching + Canny edges (Methods 2 & 3) |
 | `pyautogui` | Mouse clicks, keyboard input, screenshots |
-| `pywin32` | Win32 API for window management, clipboard, and popup dismissal |
-| `numpy` | Image array operations |
-| `Pillow` | Image handling and JPEG encoding |
+| `pywin32` | Win32 API: windowing, clipboard, popup dismissal |
+| `numpy` | Image array ops |
+| `Pillow` | Image handling + JPEG encoding |
 | `requests` | HTTP client for fetching posts |
+
+---
+
+## Deep Comparison: The Three Approaches
+
+### Method 1 — Gemini Vision: The Idea
+
+The core idea is to **offload perception entirely to a multimodal LLM**. Instead of
+writing any image-processing logic, we take a screenshot, send it to Google Gemini, and
+ask: "Where is the Notepad icon?" The model returns a bounding box in normalised
+coordinates, which we convert to screen pixels.
+
+**The logic:**
+1. Capture a full desktop screenshot.
+2. Encode it as JPEG and send it to the Gemini API with a detection prompt.
+3. Parse the returned JSON bounding box `[y_min, x_min, y_max, x_max]` (0–1000 scale).
+4. Convert to pixel coordinates and return the centre.
+
+**Why this approach?**
+The appeal is zero setup and maximum generality. No reference images need to be captured.
+The model understands what "Notepad" looks like across any wallpaper, icon size, theme,
+or screen resolution. It works even if the icon is partially occluded or in an unexpected
+location.
+
+**Pros:**
+- Zero reference image setup — works immediately with just an API key.
+- Handles any wallpaper, theme, icon size, or resolution without configuration.
+- Can understand context (e.g., distinguishing Notepad from similar-looking icons by
+  reading the label text underneath).
+- Popup dismissal uses the same model, so it works for any dialog without hardcoded
+  button labels.
+
+**Cons:**
+- Requires a Google Gemini API key and active internet connection.
+- Free tier is limited to 20 requests/day per model — a quota-exhausted run fails entirely.
+- Each detection call takes 1–3 seconds (network round-trip + model inference), far slower
+  than local OpenCV matching.
+- Ongoing cost if scaled beyond the free tier.
+
+---
+
+### Method 2 — Multi-Template Matching: The Idea
+
+The core idea is to **compare pixel-level edge structure** between pre-captured reference
+icons and the live desktop screenshot. By running Canny edge detection first, the wallpaper
+is effectively erased — only the icon's outlines and internal features survive as edges.
+The match is then purely about shape similarity.
+
+**The logic:**
+1. Pre-capture the Notepad icon at each desktop icon size setting (small, medium, large)
+   and save them as `notepad_icon_*.png` in `assets/`.
+2. At runtime, load all templates. For each one:
+   - Convert both template and screenshot to grayscale.
+   - Apply Canny edge detection to both.
+   - Slide the template edge image over the screenshot edge image using
+     `cv2.matchTemplate` with `TM_CCOEFF_NORMED`.
+   - Record the best match score and location.
+3. Accept the template with the highest score if it exceeds the threshold (0.5).
+4. Return the centre pixel of the matched region.
+
+**Why this approach?**
+Template matching is one of the most straightforward computer vision techniques — it
+literally asks "where in image A does patch B appear?" The Canny edge preprocessing is
+the key insight: raw pixel matching would fail whenever the wallpaper changes, but edge
+matching is background-agnostic because flat-coloured wallpaper regions produce zero edges.
+
+The reason we need multiple templates (one per icon size) rather than one resizable template
+is a Windows-specific detail: Windows doesn't scale a single icon image to different sizes.
+It renders completely different artwork at 32 px, 48 px, and 96 px. A small-icon template
+resized to 96 px will not match the large-icon artwork because the pixel details are
+fundamentally different.
+
+**Pros:**
+- Fully offline — no API key, no internet, no ongoing cost.
+- Extremely fast: each detection takes < 100 ms (pure CPU, no network).
+- Deterministic: the same screenshot always produces the same result.
+- High confidence threshold (0.5) means very few false positives — when it finds a match,
+  it's almost certainly correct.
+- Wallpaper-independent thanks to Canny edge preprocessing.
+
+**Cons:**
+- Cannot handle icon size variation at runtime — if the desktop icon size doesn't match
+  any captured template exactly, the match will fail.
+- Fragile across Windows versions or icon pack changes — the reference images become stale
+  if the icon artwork changes.
+- The transparent-background compositing (onto grey) is a workaround to prevent false
+  Canny edges at the boundary; it works well but adds a subtle assumption about the icon's
+  alpha channel quality.
+
+---
+
+### Method 3 — Two-Gate Template Matching: The Idea
+
+The core idea is to **combine multi-scale search with a verification step** so that a
+single reference image can match the icon at any size, while still rejecting false
+positives. Gate 1 casts a wide net (low threshold, many scales), and Gate 2 confirms
+the catch (strict edge overlap ratio).
+
+**The logic:**
+1. Load one BGRA reference image (`assets/notepad.png`).
+2. Prepare the template:
+   - Composite transparent pixels onto grey (128) to avoid false boundary edges.
+   - Extract an eroded alpha mask — only pixels well inside the icon body count.
+   - Compute "hard" Canny edges (for Gate 1) and "soft" Canny edges (for Gate 2).
+3. **Gate 1 — Coarse multi-scale search:**
+   - Resize the screenshot to 20 different scales (0.2x to 2.0x).
+   - At each scale, run `TM_CCOEFF_NORMED` between the screenshot's Canny edges and
+     the template's hard edges.
+   - Keep the single best `(score, location, scale_ratio)` across all scales.
+   - Reject if the best score is below 0.20 (very permissive — just filters out noise).
+4. **Gate 2 — Edge hit-rate verification:**
+   - Crop the candidate region identified by Gate 1 from the original-resolution
+     screenshot and resize it to the template dimensions.
+   - Apply soft edges (blurred + dilated Canny) to both template and candidate.
+   - Compute the **edge hit-rate**: what fraction of template edge pixels (inside the
+     alpha mask) overlap a candidate edge pixel?
+   - Reject if below 0.35.
+5. If both gates pass, return the centre of the candidate region.
+
+**Why two gates instead of one?**
+`TM_CCOEFF_NORMED` is a normalised cross-correlation. On sparse edge images (which
+desktop screenshots often are), it can produce misleadingly high scores for regions that
+are mostly empty — two sparse edge images can correlate well simply because they're both
+mostly black. Gate 1 alone would produce too many false positives.
+
+The edge hit-rate in Gate 2 is fundamentally different: it asks "what percentage of the
+template's edge pixels actually land on a candidate edge pixel?" This is a plain ratio
+that cannot be inflated by sparsity. A wrong region has its edges in different positions,
+so even if Gate 1 said it looked good, Gate 2 will reject it.
+
+The soft edges (lower Canny thresholds + dilation) in Gate 2 provide tolerance for slight
+misalignment after the scale conversion — edges don't need to match pixel-for-pixel, just
+be in roughly the right place.
+
+**Why erode the alpha mask?**
+The raw alpha channel includes the icon's outermost transparent pixels. After compositing
+onto grey, these boundary pixels can produce weak edges that don't correspond to real icon
+features. Eroding the mask by 5 px shrinks it inward, so Gate 2 only counts edges that are
+clearly inside the icon body.
+
+**Pros:**
+- Only one reference image needed — no per-size captures required.
+- Handles icon size variation at runtime via multi-scale search (0.2x to 2.0x range).
+- Fully offline — no API key, no internet, no ongoing cost.
+- Two-gate design gives strong false-positive rejection while keeping the search permissive
+  enough to find the icon at unusual scales.
+- The alpha mask means transparent-background PNGs work correctly without boundary artifacts.
+
+**Cons:**
+- Slower than Method 2: the multi-scale loop runs `matchTemplate` 20 times instead of once
+  per template (still under 200 ms total, but measurably slower).
+- Gate 1's low threshold (0.20) means the coarse search alone is unreliable — the method
+  depends entirely on Gate 2 for accuracy.
+- Struggles with very complex or high-frequency wallpapers where desktop edges compete with
+  icon edges, producing ambiguous hit-rates.
+
+---
+
+### Summary: When to Use Each Method
+
+| Scenario | Recommended Method |
+|----------|--------------------|
+| Quick demo, any machine, don't care about API cost | **Method 1** (Gemini) |
+| Production use on a fixed machine with known icon sizes | **Method 2** (Multi-template) |
+| Single setup, icon size may change, offline required | **Method 3** (Two-gate) |
+| Very complex wallpaper, offline required | **Method 2** (Multi-template) |
+| No setup at all, just make it work | **Method 1** (Gemini) |
+
+**Method 1** is the most flexible but the most expensive. **Method 2** is the most reliable
+but the most rigid. **Method 3** sits in the middle — more flexible than Method 2, more
+reliable than Method 1 for offline use, but with a more complex failure mode when edge
+detection encounters a busy desktop.
